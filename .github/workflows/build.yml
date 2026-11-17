@@ -19,20 +19,14 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq git python3 unzip curl xz-utils \
-            libnss3-dev lsb-release software-properties-common
-          sudo add-apt-repository -y ppa:openjdk-r/ppa >/dev/null 2>&1 || true
-
-      - name: Checkout repo (patches)
-        uses: actions/checkout@v4
-        with:
-          path: port
+            libnss3-dev lsb-release software-properties-common openjdk-11-jdk
 
       - name: depot_tools
         run: |
           git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
           echo "$PWD/depot_tools" >> $GITHUB_PATH
 
-      - name: Fetch Chromium 108 (no history)
+      - name: Fetch Chromium 108.0.5359.156 (pinned, no history)
         run: |
           export PATH="$PWD/depot_tools:$PATH"
           mkdir -p chromium && cd chromium
@@ -40,38 +34,43 @@ jobs:
           solutions = [
             {
               'name': 'src',
-              'url': 'https://chromium.googlesource.com/chromium/src.git',
+              'url': 'https://chromium.googlesource.com/chromium/src.git@108.0.5359.156',
               'custom_deps': {},
               'custom_vars': {},
             },
           ]
           target_os = ['android']
           EOF
-          timeout 3000 gclient sync --no-history --nohooks -D || true
-          if [ ! -d src ]; then echo "FATAL: no se descargó src"; exit 1; fi
+          gclient sync --no-history --nohooks -D
           cd src
-          git checkout 108.0.5359.156 2>/dev/null || true
+          echo "== checked out revision =="
+          git rev-parse HEAD
+          echo "== config.gni default minSdk (must be 23 in stock 108) =="
+          grep -n "default_min_sdk_version" build/config/android/config.gni | head -3
           echo "== source size =="; du -sh . 2>/dev/null || true
           echo "== disk after fetch =="; df -h . | tail -1
 
-      - name: Delete .git dirs to save disk
+      - name: Install toolchain (gclient hooks)
         run: |
-          cd chromium
-          find . -name .git -type d -prune -print0 | xargs -0 -r rm -rf
-          echo "== after cleanup =="; df -h . | tail -1
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd "$GITHUB_WORKSPACE/chromium"
+          gclient runhooks
+          echo "== disk after hooks =="; df -h . | tail -1
 
-      - name: Apply KitKat patches
+      - name: Apply KitKat minSdk patch
         run: |
-          cd chromium/src
-          for p in "$GITHUB_WORKSPACE"/port/patches/kitkat-108/*.patch; do
-            echo "aplicando $(basename "$p")"
-            git apply --3way "$p" || echo "AVISO: conflicto, se continúa"
-          done
+          cd "$GITHUB_WORKSPACE/chromium/src"
+          # Stock 108 declares default_min_sdk_version = 23 inside declare_args().
+          # Lower it to 19 (KitKat / API 19). args.gn also overrides it below.
+          sed -i 's/default_min_sdk_version = 23/default_min_sdk_version = 19/' \
+            build/config/android/config.gni
+          echo "== patched config.gni =="
+          grep -n "default_min_sdk_version" build/config/android/config.gni | head -3
 
       - name: Configure GN
         run: |
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
-          cd chromium/src
+          cd "$GITHUB_WORKSPACE/chromium/src"
           mkdir -p out/kitkat
           cat > out/kitkat/args.gn <<'EOF'
           target_os = "android"
@@ -80,7 +79,6 @@ jobs:
           is_official_build = false
           symbol_level = 0
           exclude_unwind_tables = true
-          android_min_sdk_version = 19
           default_min_sdk_version = 19
           disable_android_lint = true
           use_errorprone_java_compiler = false
@@ -95,7 +93,7 @@ jobs:
       - name: Build chrome_public_apk
         run: |
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
-          cd chromium/src
+          cd "$GITHUB_WORKSPACE/chromium/src"
           autoninja -C out/kitkat chrome_public_apk
 
       - name: Upload APK
