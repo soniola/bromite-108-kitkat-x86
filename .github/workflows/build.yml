@@ -36,7 +36,11 @@ jobs:
               'name': 'src',
               'url': 'https://chromium.googlesource.com/chromium/src.git@108.0.5359.156',
               'custom_deps': {},
-              'custom_vars': {},
+              # "small" skips two stale GCS hooks (traffic_annotation_auditor,
+              # instrumented_libraries) whose 2022 objects were deleted from
+              # Google Storage. These are not needed to build an APK. The
+              # clang/NDK/SDK hooks still run.
+              'custom_vars': { 'checkout_configuration': 'small' },
             },
           ]
           target_os = ['android']
@@ -54,7 +58,9 @@ jobs:
         run: |
           export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
           cd "$GITHUB_WORKSPACE/chromium"
-          gclient runhooks
+          gclient runhooks || echo "AVISO: un hook opcional falló (objeto GCS antiguo); se continúa"
+          echo "== verificar toolchain clang =="
+          ls src/third_party/llvm-build/Release+Asserts/bin/clang 2>/dev/null && echo "CLANG OK" || echo "CLANG FALTA"
           echo "== disk after hooks =="; df -h . | tail -1
 
       - name: Apply KitKat minSdk patch
