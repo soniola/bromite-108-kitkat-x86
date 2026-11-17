@@ -19,7 +19,21 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq git python3 unzip curl xz-utils \
-            libnss3-dev lsb-release software-properties-common openjdk-11-jdk
+            lsb-release software-properties-common openjdk-11-jdk \
+            gperf bison flex \
+            libnss3-dev libglib2.0-dev libatspi2.0-dev libatk-bridge2.0-dev \
+            libx11-dev libxcomposite-dev libxdamage-dev libxext-dev \
+            libxfixes-dev libxrandr-dev libxrender-dev libxcb1-dev libxtst-dev \
+            libdrm-dev libgbm-dev libasound2-dev \
+            libpango1.0-dev libcairo2-dev libfontconfig1-dev libfreetype6-dev \
+            libgtk-3-dev fonts-liberation ccache
+
+      - name: Cache ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-bromite108-kitkat-${{ runner.os }}-${{ github.sha }}
+          restore-keys: ccache-bromite108-kitkat-${{ runner.os }}-
 
       - name: depot_tools
         run: |
@@ -83,6 +97,7 @@ jobs:
           target_cpu = "x86"
           is_debug = false
           is_official_build = false
+          cc_wrapper = "ccache"
           symbol_level = 0
           exclude_unwind_tables = true
           default_min_sdk_version = 19
