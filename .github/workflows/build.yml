@@ -1,0 +1,111 @@
+name: Bromite 108 KitKat x86 (free runner attempt)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Report free disk / RAM
+        run: |
+          echo "== disk =="; df -h . /mnt 2>/dev/null || true
+          echo "== ram =="; free -h
+          echo "== cpu =="; nproc
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq git python3 unzip curl xz-utils \
+            libnss3-dev lsb-release software-properties-common
+          sudo add-apt-repository -y ppa:openjdk-r/ppa >/dev/null 2>&1 || true
+
+      - name: Checkout repo (patches)
+        uses: actions/checkout@v4
+        with:
+          path: port
+
+      - name: depot_tools
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git depot_tools
+          echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+      - name: Fetch Chromium 108 (no history)
+        run: |
+          export PATH="$PWD/depot_tools:$PATH"
+          mkdir -p chromium && cd chromium
+          cat > .gclient <<'EOF'
+          solutions = [
+            {
+              'name': 'src',
+              'url': 'https://chromium.googlesource.com/chromium/src.git',
+              'custom_deps': {},
+              'custom_vars': {},
+            },
+          ]
+          target_os = ['android']
+          EOF
+          timeout 3000 gclient sync --no-history --nohooks -D || true
+          if [ ! -d src ]; then echo "FATAL: no se descargó src"; exit 1; fi
+          cd src
+          git checkout 108.0.5359.156 2>/dev/null || true
+          echo "== source size =="; du -sh . 2>/dev/null || true
+          echo "== disk after fetch =="; df -h . | tail -1
+
+      - name: Delete .git dirs to save disk
+        run: |
+          cd chromium
+          find . -name .git -type d -prune -print0 | xargs -0 -r rm -rf
+          echo "== after cleanup =="; df -h . | tail -1
+
+      - name: Apply KitKat patches
+        run: |
+          cd chromium/src
+          for p in "$GITHUB_WORKSPACE"/port/patches/kitkat-108/*.patch; do
+            echo "aplicando $(basename "$p")"
+            git apply --3way "$p" || echo "AVISO: conflicto, se continúa"
+          done
+
+      - name: Configure GN
+        run: |
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd chromium/src
+          mkdir -p out/kitkat
+          cat > out/kitkat/args.gn <<'EOF'
+          target_os = "android"
+          target_cpu = "x86"
+          is_debug = false
+          is_official_build = false
+          symbol_level = 0
+          exclude_unwind_tables = true
+          android_min_sdk_version = 19
+          default_min_sdk_version = 19
+          disable_android_lint = true
+          use_errorprone_java_compiler = false
+          enable_vr = false
+          enable_vulkan = false
+          enable_nacl = false
+          chrome_pgo_phase = 0
+          use_debug_fission = false
+          EOF
+          gn gen out/kitkat
+
+      - name: Build chrome_public_apk
+        run: |
+          export PATH="$GITHUB_WORKSPACE/depot_tools:$PATH"
+          cd chromium/src
+          autoninja -C out/kitkat chrome_public_apk
+
+      - name: Upload APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bromite-108-kitkat-x86
+          path: chromium/src/out/kitkat/apks/ChromePublic.apk
+          if-no-files-found: error
+
+      - name: Final disk report
+        if: always()
+        run: df -h . | tail -1

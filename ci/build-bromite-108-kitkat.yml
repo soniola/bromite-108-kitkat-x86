@@ -1,0 +1,89 @@
+# GitHub Actions workflow: experimental build of Bromite 108 (Chromium 108)
+# with build-level API 19 / KitKat support restored.
+#
+# !! IMPORTANT !!
+# Chromium needs 60-100 GB of free disk and 16+ GB RAM. GitHub-hosted
+# runners (~14 GB) CANNOT do this. Run this on a self-hosted runner with a
+# big SSD, or on a paid "larger runner" (40-core / 150 GB disk).
+#
+# The patch set in ../patches/kitkat-108/ only restores minSdk 19 in the
+# build system. It is a STARTING POINT: expect to iterate on runtime
+# API 21+ calls until the APK boots on the tablet (see README_KITKAT.md).
+#
+# Copy this file to .github/workflows/ in a fork of
+# https://github.com/bromite/bromite (branch 108.0.5359.156).
+
+name: Bromite 108 KitKat x86 (experimental)
+
+on:
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: 'Runner label (self-hosted with >=100GB free)'
+        required: true
+        default: 'self-hosted-kitkat-bigdisk'
+
+jobs:
+  build:
+    runs-on: ${{ github.event.inputs.runner }}
+    timeout-minutes: 720
+
+    steps:
+      - name: Check disk space
+        run: df -h . && test "$(df -Pm . | awk 'NR==2{print $4}')" -gt 90000
+
+      - name: Checkout Bromite 108
+        uses: actions/checkout@v4
+        with:
+          ref: 108.0.5359.156
+          submodules: false
+
+      - name: Install depot_tools
+        run: |
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
+          echo "/tmp/depot_tools" >> $GITHUB_PATH
+
+      - name: Fetch Chromium source (no history)
+        run: |
+          export PATH=/tmp/depot_tools:$PATH
+          fetch --no-history --nohooks android
+          git -c advice.detachedHead=false checkout 108.0.5359.156
+          gclient sync --nohooks --no-history -D
+          # Bromite's patches live in build/ and are applied by its own script.
+          ./build.sh  # upstream Bromite helper (if present) - adapt as needed
+
+      - name: Apply KitKat patches
+        run: |
+          git apply --3way ../patches/kitkat-108/01-revert-minsdk-19-to-21.patch || true
+          # Add further runtime patches here as they are discovered on-device.
+
+      - name: Configure GN (x86, API 19, minimal target)
+        run: |
+          mkdir -p out/kitkat-x86
+          cat > out/kitkat-x86/args.gn <<'EOF'
+          target_os = "android"
+          target_cpu = "x86"
+          is_debug = false
+          is_official_build = true
+          android_min_sdk_version = 19
+          default_min_sdk_version = 19
+          disable_android_lint = true
+          symbol_level = 0
+          exclude_unwind_tables = true
+          use_errorprone_java_compiler = false
+          enable_vr = false
+          enable_vulkan = false
+          chrome_pgo_phase = 0
+          EOF
+          gn gen out/kitkat-x86
+
+      - name: Build chrome_public_apk
+        run: |
+          export PATH=/tmp/depot_tools:$PATH
+          autoninja -C out/kitkat-x86 chrome_public_apk
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: bromite-108-kitkat-x86
+          path: out/kitkat-x86/apks/ChromePublic.apk

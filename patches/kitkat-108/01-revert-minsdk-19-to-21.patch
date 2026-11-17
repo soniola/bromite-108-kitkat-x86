@@ -1,0 +1,322 @@
+From b9539df0335260c1b00b175d0fd5a9286943e200 Mon Sep 17 00:00:00 2001
+From: Andrew Grieve <agrieve@chromium.org>
+Date: Fri, 12 Jun 2020 16:27:44 +0000
+Subject: [PATCH] KitKat: revert upstream minSdk 21 bump (restore API 19)
+
+Reversed form of chromium commit b9539df03352 ("Reland #3: Android:
+Increase default_min_sdk_version 19 -> 21", June 2020). Apply this to
+a Bromite 108 / Chromium 108 checkout to restore build-level support
+for android:minSdkVersion=19 (KitKat). Runtime API gaps still need
+individual patches; see README.md.
+
+This reverts commit 67dc51dd00a3b9c3a0efb2853290cff1b0fea1d6.
+
+Reason for reland: Added min_sdk_version to failed targets
+
+TBR=agrieve  # reland
+
+Bug: 1091919
+Change-Id: I169028c59d5cd66d9257db28305d6c8e2f4b385b
+Reviewed-on: https://chromium-review.googlesource.com/c/chromium/src/+/2242637
+Reviewed-by: Nancy Wang <nancylingwang@chromium.org>
+Commit-Queue: Andrew Grieve <agrieve@chromium.org>
+Cr-Commit-Position: refs/heads/master@{#777830}
++--
+ build/android/gyp/dex.py                      | 13 ++++++---
+ build/android/gyp/write_build_config.py       | 18 ++++++++-----
+ build/config/android/config.gni               |  5 ++--
+ build/config/android/internal_rules.gni       | 27 ++++++++++---------
+ build/config/android/rules.gni                | 13 +++++----
+ .../AndroidManifest.xml.jinja2                |  1 -
+ components/cronet/android/BUILD.gn            |  3 +++
+ net/BUILD.gn                                  |  3 +++
+ net/android/BUILD.gn                          |  3 +++
+ 9 files changed, 54 insertions(+), 32 deletions(-)
+
+diff --git a/build/android/gyp/dex.py b/build/android/gyp/dex.py
+index 8ba7640050e26c..6fd0ab35dd859e 100755
+--- a/build/android/gyp/dex.py
++++ b/build/android/gyp/dex.py
+@@ -62,6 +62,9 @@ def _ParseArgs(args):
+       '--multi-dex',
+       action='store_true',
+       help='Allow multiple dex files within output.')
+-  parser.add_argument('--library',
+-                      action='store_true',
+-                      help='Allow numerous dex files within output.')
+   parser.add_argument('--r8-jar-path', required=True, help='Path to R8 jar.')
+   parser.add_argument('--desugar', action='store_true')
+   parser.add_argument(
+@@ -334,13 +337,15 @@ def _PerformDexlayout(tmp_dir, tmp_dex_output, options):
+ 
+ def _CreateFinalDex(d8_inputs, output, tmp_dir, dex_cmd, options=None):
+   tmp_dex_output = os.path.join(tmp_dir, 'tmp_dex_output.zip')
++  if (output.endswith('.dex')
++      or not all(f.endswith('.dex') for f in d8_inputs)):
+-  needs_dexing = not all(f.endswith('.dex') for f in d8_inputs)
+-  needs_dexmerge = output.endswith('.dex') or not (options and options.library)
+-  if needs_dexing or needs_dexmerge:
+     if options:
+       if options.main_dex_list_path:
+         dex_cmd = dex_cmd + ['--main-dex-list', options.main_dex_list_path]
++      elif options.multi_dex and int(options.min_api or 1) < 21:
++        # When dexing library targets, it doesn't matter what's in the main dex.
+-      elif options.library and int(options.min_api or 1) < 21:
+-        # When dexing D8 requires a main dex list pre-21. For library targets,
+-        # it doesn't matter what's in the main dex, so just use a dummy one.
+         tmp_main_dex_list_path = os.path.join(tmp_dir, 'main_list.txt')
+         with open(tmp_main_dex_list_path, 'w') as f:
+           f.write('Foo.class\n')
+diff --git a/build/android/gyp/write_build_config.py b/build/android/gyp/write_build_config.py
+index 38d38e4a5bf5ea..dadfdbdd01e5ed 100755
+--- a/build/android/gyp/write_build_config.py
++++ b/build/android/gyp/write_build_config.py
+@@ -1695,7 +1695,8 @@ def main(argv):
+ 
+     # Add all tested classes to the test's classpath to ensure that the test's
+     # java code is a superset of the tested apk's java code
++    java_full_classpath.extend(
+-    java_full_classpath_extended = list(java_full_classpath)
+-    java_full_classpath_extended.extend(
+         p for p in tested_apk_config['java_runtime_classpath']
+         if p not in java_full_classpath)
+     # Include in the classpath classes that are added directly to the apk under
+@@ -1716,13 +1717,13 @@ def main(argv):
+         p for p in tested_apk_config['javac_full_classpath']
+         if p not in javac_full_classpath)
+ 
++    # Exclude dex files from the test apk that exist within the apk under test.
++    # TODO(agrieve): When proguard is enabled, this filtering logic happens
++    #     within proguard.py. Move the logic for the proguard case to here.
+-    # Exclude .jar files from the test apk that exist within the apk under test.
+     tested_apk_library_deps = tested_apk_deps.All('java_library')
++    tested_apk_deps_dex_files = [c['dex_path'] for c in tested_apk_library_deps]
++    all_dex_files = [
++        p for p in all_dex_files if not p in tested_apk_deps_dex_files
+-    tested_apk_dex_files = {c['dex_path'] for c in tested_apk_library_deps}
+-    all_dex_files = [p for p in all_dex_files if p not in tested_apk_dex_files]
+-    tested_apk_jar_files = set(tested_apk_config['java_runtime_classpath'])
+-    java_full_classpath = [
+-        p for p in java_full_classpath if p not in tested_apk_jar_files
+     ]
+ 
+   if options.type in ('android_apk', 'dist_aar', 'dist_jar',
+@@ -1763,6 +1764,9 @@ def main(argv):
+   if options.type in ('android_apk', 'dist_jar', 'java_binary', 'junit_binary',
+       'android_app_bundle_module', 'android_app_bundle'):
+     deps_info['java_runtime_classpath'] = java_full_classpath
+-    if options.tested_apk_config:
+-      deps_info['java_runtime_classpath_extended'] = (
+-          java_full_classpath_extended)
+ 
+   if options.type in ('android_apk', 'dist_jar'):
+     all_interface_jars = []
+diff --git a/build/config/android/config.gni b/build/config/android/config.gni
+index 390a496d157d98..8838f279509b75 100644
+--- a/build/config/android/config.gni
++++ b/build/config/android/config.gni
+@@ -46,9 +46,8 @@ if (is_android || is_chromeos) {
+     enable_chrome_android_internal = has_chrome_android_internal
+ 
+     # The default to use for android:minSdkVersion for targets that do
++    # not explicitly set it. This can generally be set higher than the
++    # default, but not lower.
++    default_min_sdk_version = 19
+-    # not explicitly set it.
+-    default_min_sdk_version = 21
+ 
+     # Android API level for 32 bits platforms
+     android32_ndk_api_level = 16
+diff --git a/build/config/android/internal_rules.gni b/build/config/android/internal_rules.gni
+index 79a050eb012801..928bbc6fe79bf4 100644
+--- a/build/config/android/internal_rules.gni
++++ b/build/config/android/internal_rules.gni
+@@ -1304,6 +1304,9 @@ if (enable_java_templates) {
+       }
+     }
+ 
+-    # It's not safe to dex merge with libraries dex'ed at higher api versions.
+-    assert(!_is_dex_merging || _min_sdk_version >= default_min_sdk_version)
+-
+     # For D8's backported method desugaring to work properly, the dex merge step
+     # must not be set to a higher minSdkVersion than it was for the libraries.
+     if (_enable_desugar && _is_dex_merging) {
+@@ -1366,9 +1369,13 @@ if (enable_java_templates) {
+ 
+         args = [
+           "--proguard-configs=@FileArg($_rebased_build_config:deps_info:proguard_all_configs)",
++          "--input-paths=@FileArg($_rebased_build_config:deps_info:java_runtime_classpath)",
+           "--min-api=$_min_sdk_version",
+         ]
+-        if (defined(invoker.has_apk_under_test) && invoker.has_apk_under_test) {
+-          args += [ "--input-paths=@FileArg($_rebased_build_config:deps_info:java_runtime_classpath_extended)" ]
+-        } else {
+-          args += [ "--input-paths=@FileArg($_rebased_build_config:deps_info:java_runtime_classpath)" ]
+-        }
+         if (enable_bazel_desugar) {
+           deps += [ "//third_party/bazel/desugar:desugar_runtime_java" ]
+           inputs += [ "$root_build_dir/lib.java/third_party/bazel/desugar/Desugar_runtime.jar" ]
+@@ -1416,13 +1423,14 @@ if (enable_java_templates) {
+         }
+       }
+     } else {  # !_proguard_enabled
+-      _is_library = defined(invoker.is_library) && invoker.is_library
+       _input_class_jars = []
+       if (defined(invoker.input_class_jars)) {
+         _input_class_jars = invoker.input_class_jars
+       }
+       _deps = invoker.deps
+ 
++      if (_is_dex_merging && enable_bazel_desugar) {
+-      if (!_is_library && enable_bazel_desugar) {
+         # It would be more efficient to use the pre-dex'ed copy of the runtime,
+         # but it's easier to add it in this way.
+         _deps += [ "//third_party/bazel/desugar:desugar_runtime_java" ]
+@@ -1546,11 +1554,10 @@ if (enable_java_templates) {
+             deps += [ ":${_main_dex_list_target_name}" ]
+             inputs += [ _main_dex_list_path ]
+           }
++        } else if (defined(invoker.enable_library_multidex) &&
++                   invoker.enable_library_multidex) {
++          args += [ "--multi-dex" ]
+         }
++
+-        if (_is_library) {
+-          args += [ "--library" ]
+-        }
+         if (defined(invoker.input_dex_filearg)) {
+           inputs += [ invoker.build_config ]
+           args += [ "--dex-inputs-filearg=${invoker.input_dex_filearg}" ]
+@@ -1588,7 +1595,7 @@ if (enable_java_templates) {
+         # 1) not require recompiles when toggling is_java_debug,
+         # 2) allow incremental_install=1 to still have local variable
+         #    information even when is_java_debug=false.
++        if (!is_java_debug && _is_dex_merging) {
+-        if (!is_java_debug && !_is_library) {
+           args += [ "--release" ]
+         }
+ 
+@@ -3259,8 +3266,6 @@ if (enable_java_templates) {
+   #    from the final .jar file.
+   #  jar_included_patterns: Optional list of .class file patterns to include
+   #    in the final .jar file. jar_excluded_patterns take precedence over this.
++  #  min_sdk_version: Optional. The minimum Android SDK version this target
++  #    supports.
+   #
+   # For 'android_apk' and 'android_app_bundle_module' targets only:
+   #
+@@ -3793,10 +3798,8 @@ if (enable_java_templates) {
+               deps += _classpath_deps + [ ":$_header_target_name" ]
+             }
+ 
++            # For library targets, we do not need a proper main dex list, but do
++            # need to allow multiple dex files.
+             enable_multidex = false
++            enable_library_multidex = true
+-            is_library = true
+           }
+           _public_deps += [ ":${target_name}__dex" ]
+         }
+diff --git a/build/config/android/rules.gni b/build/config/android/rules.gni
+index f71bb26b8f9307..a3bdf6e9ba402c 100644
+--- a/build/config/android/rules.gni
++++ b/build/config/android/rules.gni
+@@ -2427,9 +2427,7 @@ if (enable_java_templates) {
+ 
+     _final_deps = []
+ 
++    _enable_main_dex_list =
++        _enable_multidex &&
++        (!defined(invoker.min_sdk_version) || invoker.min_sdk_version < 21)
+-    _enable_main_dex_list = _enable_multidex && _min_sdk_version < 21
+     if (_enable_main_dex_list) {
+       _generated_proguard_main_dex_config =
+           "$_base_path.resources.main-dex-proguard.txt"
+@@ -2924,12 +2922,17 @@ if (enable_java_templates) {
+           deps += _deps + [ ":$_compile_resources_target" ]
+           proguard_mapping_path = _proguard_mapping_path
+           proguard_sourcefile_suffix = "$android_channel-$_version_code"
++        } else {
+-          has_apk_under_test = defined(invoker.apk_under_test)
+-        } else if (_min_sdk_version >= default_min_sdk_version) {
+-          # Enable dex merging only when min_sdk_version is >= what the library
+-          # .dex files were created with.
+           input_dex_filearg =
+               "@FileArg(${_rebased_build_config}:final_dex:all_dex_files)"
+           if (_enable_main_dex_list) {
++            main_dex_list_input_classes_filearg = "@FileArg(${_rebased_build_config}:deps_info:java_runtime_classpath)"
+-            main_dex_list_input_classes_filearg = "@FileArg(${_rebased_build_config}:deps_info:java_runtime_classpath_extended)"
+           }
+-        } else {
+-          input_classes_filearg = "@FileArg($_rebased_build_config:deps_info:java_runtime_classpath)"
+         }
+ 
+         if (_is_static_library_provider) {
+diff --git a/chrome/test/android/browsertests_apk/AndroidManifest.xml.jinja2 b/chrome/test/android/browsertests_apk/AndroidManifest.xml.jinja2
+index 519004cfd58868..c3dd2e39e7e8e7 100644
+--- a/chrome/test/android/browsertests_apk/AndroidManifest.xml.jinja2
++++ b/chrome/test/android/browsertests_apk/AndroidManifest.xml.jinja2
+@@ -10,7 +10,6 @@
+     xmlns:tools="http://schemas.android.com/tools"
+     package="org.chromium.android_browsertests_apk">
+ 
++    <uses-sdk android:minSdkVersion="19" android:targetSdkVersion="23" />
+     <uses-feature android:glEsVersion="0x00020000" />
+ 
+     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+diff --git a/components/cronet/android/BUILD.gn b/components/cronet/android/BUILD.gn
+index b363d14f197d38..8b3e8a870314c7 100644
+--- a/components/cronet/android/BUILD.gn
++++ b/components/cronet/android/BUILD.gn
+@@ -1110,6 +1110,7 @@ if (!is_component_build) {
+       "cronet_smoketests_missing_native_library_instrumentation_apk") {
+     apk_name = "MissingNativeLibrarySmokeTestInstrumentation"
+     android_manifest = "test/javatests/AndroidManifest.xml"
+-    min_sdk_version = _cronet_min_sdk_version
+ 
+     sources = cronet_smoketests_native_common_srcs + [ "test/smoketests/src/org/chromium/net/smoke/MissingNativeLibraryTest.java" ]
+     deps = [
+@@ -1179,6 +1180,7 @@ if (!is_component_build) {
+   }
+ 
+   test("cronet_unittests_android") {
+-    min_sdk_version = _cronet_min_sdk_version
+     deps = [
+       ":cronet_impl_native_base_java",
+       ":cronet_static",
+@@ -1204,6 +1206,7 @@ if (!is_component_build) {
+   }
+ 
+   test("cronet_tests_android") {
+-    min_sdk_version = _cronet_min_sdk_version
+     deps = [
+       ":cronet_impl_native_base_java",
+       ":cronet_static",
+diff --git a/net/BUILD.gn b/net/BUILD.gn
+index c8e3e86f30ae54..9226de2fd34b31 100644
+--- a/net/BUILD.gn
++++ b/net/BUILD.gn
+@@ -4801,6 +4801,9 @@ test("net_unittests") {
+       "//testing/android/native_test:native_test_native_code",
+     ]
+     android_manifest = "//net/android/unittest_support/AndroidManifest.xml"
+-
+-    # Cronet still supports kitkat.
+-    min_sdk_version = 19
+     sources += [
+       "base/address_tracker_linux_unittest.cc",
+       "base/network_interfaces_linux_unittest.cc",
+diff --git a/net/android/BUILD.gn b/net/android/BUILD.gn
+index 8547015246cf67..330304387650e7 100644
+--- a/net/android/BUILD.gn
++++ b/net/android/BUILD.gn
+@@ -139,6 +139,9 @@ android_apk("net_test_support_apk") {
+   # just disable it.
+   enable_multidex = false
+ 
+-  # Cronet still supports kitkat.
+-  min_sdk_version = 19
+-
+   deps = [
+     ":net_java_test_support",
+     ":net_java_test_support_provider",
