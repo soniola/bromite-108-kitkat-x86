@@ -89,7 +89,6 @@ jobs:
           disable_android_lint = true
           use_errorprone_java_compiler = false
           enable_vr = false
-          enable_vulkan = false
           enable_nacl = false
           chrome_pgo_phase = 0
           use_debug_fission = false
